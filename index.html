@@ -326,6 +326,37 @@ td .acoes{display:flex;gap:7px;justify-content:flex-end}
 .tag-recor{background:#F3EAFB;color:#8A5AA8}
 .tag-recor.fixa{background:#EAF3FB;color:#3F6DA8}
 .tag-projetada{opacity:.72}
+/* ---- simulação de parcelas no formulário ---- */
+.simulacao{display:grid;grid-template-columns:1fr;gap:8px;max-height:290px;overflow-y:auto;padding:4px 2px 2px}
+@media(min-width:640px){ .simulacao{grid-template-columns:repeat(2,1fr)} }
+@media(min-width:980px){ .simulacao{grid-template-columns:repeat(3,1fr)} }
+.sim-item{
+  display:flex;align-items:center;gap:9px;background:#FFFBFC;border:1.5px solid var(--linha);
+  border-radius:14px;padding:8px 10px;
+}
+.sim-item.editada{border-color:var(--rosa);background:#FFF3F7}
+.sim-item .num{
+  flex:0 0 auto;font-family:var(--serif);font-weight:600;font-size:12.5px;color:var(--rose-gold);
+  min-width:42px;text-align:center;
+}
+.sim-item .cifrao{color:var(--texto-2);font-size:12px;font-weight:600}
+.sim-item input{
+  flex:1;min-width:0;width:100%;padding:7px 9px;border-radius:10px;border:1.5px solid var(--linha);
+  background:#fff;font-size:13px;font-weight:600;color:var(--texto);text-align:right;
+}
+.sim-item input:focus{outline:none;border-color:var(--rosa);box-shadow:0 0 0 3px #FFE9EF}
+.simulacao-total{
+  margin-top:10px;text-align:right;font-size:13px;font-weight:600;color:var(--rose-gold);padding-right:4px;
+}
+/* bloco de edição individual de parcela no modal */
+.card-parcela-edit{
+  margin-top:14px;padding:14px;border-radius:16px;
+  background:linear-gradient(135deg,#FFF6FA,#FFF0F5);border:1.5px solid var(--rosa);
+}
+.card-parcela-edit .cpe-titulo{
+  font-weight:700;color:var(--rosa-forte);font-size:13.5px;margin-bottom:10px;display:flex;align-items:center;gap:7px;
+}
+.tag-editada{background:#FFF3F7;color:var(--rosa-forte);border:1px solid var(--rosa)}
 .linha-projetada td{background:linear-gradient(90deg, #FFFBFC, #FFF6FA)}
 .linha-projetada .desc-obs::before{content:"Provisão · ";color:var(--rosa-forte);font-weight:600}
 .chip.pessoa{background:var(--leite);color:var(--rosa-forte)}
@@ -592,6 +623,11 @@ button.tag:hover{border-color:currentColor}
         <div class="field wide">
           <label for="lcObs">Observações</label>
           <textarea id="lcObs" placeholder="Detalhes que você quer lembrar depois (opcional)"></textarea>
+        </div>
+        <div class="field wide" id="wrapSimulacao" style="display:none">
+          <label>Prévia das parcelas <span class="hint" style="font-weight:500">· edite o valor de qualquer parcela antes de salvar</span></label>
+          <div class="simulacao" id="simulacaoLista"></div>
+          <div class="simulacao-total" id="simulacaoTotal"></div>
         </div>
         <div class="field wide">
           <button type="submit" class="btn btn-primary btn-block"><i class="fa-solid fa-heart-circle-plus"></i>Salvar lançamento</button>
@@ -894,18 +930,27 @@ function gerarOcorrencia(t, ano, mes, parcelaAtual, parcelasTotal){
   const dia = p.dia || 1;
   const dataOcorr = `${AM(ano,mes)}-${String(Math.min(dia,28)).padStart(2,'0')}`;
   const sufixo = parcelasTotal ? ` (${parcelaAtual}/${parcelasTotal})` : '';
+  // valor específico desta parcela, se a usuária editou (independente das demais)
+  let valorOcorr = t.valor;
+  let editada = false;
+  if(parcelasTotal && t.valores && t.valores[String(parcelaAtual)] != null){
+    valorOcorr = num(t.valores[String(parcelaAtual)]);
+    editada = true;
+  }
   return {
     ...t,
     id: chaveOcorr(t.id, ano, mes),   // id sintético estável da ocorrência
     data: dataOcorr,
     descricao: (t.descricao || '') + sufixo,
+    valor: valorOcorr,
     status: statusOcorr(t, ano, mes),
     _virtual: true,
     _templateId: t.id,
     _ano: ano, _mes: mes,
     _recorrencia: t.recorrencia,
     _parcelaAtual: parcelaAtual,
-    _parcelasTotal: parcelasTotal
+    _parcelasTotal: parcelasTotal,
+    _valorEditado: editada
   };
 }
 
@@ -1141,14 +1186,72 @@ function atualizarRecorrenciaForm(){
   $('#wrapInicio').style.display   = (ehParcelado || ehFixo) ? '' : 'none';
   $('#wrapParcelas').style.display = ehParcelado ? '' : 'none';
   $('#lblInicio').textContent = ehParcelado ? 'Data da 1ª parcela (mês/ano)' : 'Mês de início';
-  $('#lblValor').textContent  = ehParcelado ? 'Valor de cada parcela (R$)'
+  $('#lblValor').textContent  = ehParcelado ? 'Valor padrão de cada parcela (R$)'
                               : ehFixo ? 'Valor por mês (R$)'
                               : 'Valor (R$)';
   // status faz sentido só para lançamento único; nos recorrentes o status é por mês
   const wrapStatus = $('#lcStatus').closest('.field');
   if(wrapStatus) wrapStatus.style.display = (ehParcelado || ehFixo) ? 'none' : '';
+  $('#wrapSimulacao').style.display = ehParcelado ? '' : 'none';
+  renderSimulacao();
 }
 $('#lcRecorrencia').onchange = atualizarRecorrenciaForm;
+
+/* ---- Simulação editável de parcelas ---------------------------------
+   simOverrides guarda os valores que a usuária editou na prévia,
+   por número de parcela (string). Parcelas não editadas seguem o padrão. */
+let simOverrides = {};
+function renderSimulacao(){
+  if($('#lcRecorrencia').value !== 'parcelado'){ $('#simulacaoLista').innerHTML=''; $('#simulacaoTotal').textContent=''; return; }
+  const total = Math.max(0, Math.min(120, parseInt($('#lcParcelas').value) || 0));
+  const padrao = num($('#lcValor').value);
+  if(total < 1){
+    $('#simulacaoLista').innerHTML = `<div class="hint" style="grid-column:1/-1;padding:6px 2px">Informe a quantidade de parcelas e o valor para ver a prévia.</div>`;
+    $('#simulacaoTotal').textContent = '';
+    return;
+  }
+  let somaTotal = 0;
+  let html = '';
+  for(let n = 1; n <= total; n++){
+    const custom = simOverrides[String(n)];
+    const valor = custom != null && custom !== '' ? num(custom) : padrao;
+    somaTotal += valor;
+    const editada = custom != null && custom !== '';
+    html += `
+      <div class="sim-item ${editada ? 'editada' : ''}">
+        <span class="num">${n}/${total}</span>
+        <span class="cifrao">R$</span>
+        <input type="number" step="0.01" min="0" data-parcela="${n}"
+               value="${editada ? escapar(String(custom)) : (padrao ? padrao.toFixed(2) : '')}"
+               placeholder="${padrao ? padrao.toFixed(2) : '0,00'}">
+      </div>`;
+  }
+  $('#simulacaoLista').innerHTML = html;
+  $('#simulacaoTotal').textContent = `Total das ${total} parcelas: ${moeda(somaTotal)}`;
+}
+// captura edições na prévia sem re-renderizar a cada tecla (mantém o foco)
+$('#simulacaoLista').addEventListener('input', e => {
+  const inp = e.target.closest('input[data-parcela]');
+  if(!inp) return;
+  const n = inp.dataset.parcela;
+  if(inp.value === '') delete simOverrides[n];
+  else simOverrides[n] = inp.value;
+  inp.closest('.sim-item').classList.toggle('editada', inp.value !== '');
+  // atualiza só o total, sem recriar os inputs
+  const total = Math.max(0, Math.min(120, parseInt($('#lcParcelas').value) || 0));
+  const padrao = num($('#lcValor').value);
+  let soma = 0;
+  for(let i=1;i<=total;i++){ const c=simOverrides[String(i)]; soma += (c!=null&&c!=='')?num(c):padrao; }
+  $('#simulacaoTotal').textContent = `Total das ${total} parcelas: ${moeda(soma)}`;
+});
+// quando muda a quantidade de parcelas, recria a lista (limpa overrides fora do range)
+$('#lcParcelas').addEventListener('input', () => {
+  const total = parseInt($('#lcParcelas').value) || 0;
+  Object.keys(simOverrides).forEach(k => { if(Number(k) > total) delete simOverrides[k]; });
+  renderSimulacao();
+});
+// mudar o valor padrão só reflete nas parcelas NÃO editadas — recria preservando overrides
+$('#lcValor').addEventListener('input', () => { if($('#lcRecorrencia').value==='parcelado') renderSimulacao(); });
 
 /* =====================================================================
    6. LANÇAMENTOS
@@ -1182,11 +1285,20 @@ $('#formLancamento').addEventListener('submit', e => {
       const parcelas = Math.max(1, parseInt($('#lcParcelas').value) || 0);
       if(parcelas < 1){ aviso('Informe a quantidade de parcelas', true); return; }
       base.parcelas = parcelas;
+      // grava só as parcelas que a usuária editou na prévia (valores independentes)
+      const valores = {};
+      Object.keys(simOverrides).forEach(n => {
+        const num_n = Number(n);
+        const v = num(simOverrides[n]);
+        if(num_n >= 1 && num_n <= parcelas && v > 0) valores[n] = v;
+      });
+      if(Object.keys(valores).length) base.valores = valores;
     }
   }
 
   dados.transacoes.push(base);
   salvar();
+  simOverrides = {};
   e.target.reset();
   $('#lcData').value = hojeISO();
   $('#lcRecorrencia').value = 'avista';
@@ -1210,13 +1322,34 @@ function editarTransacao(idAlvo){
   const recorrente = rec === 'parcelado' || rec === 'fixo';
   const nomeRec = rec === 'parcelado' ? 'Parcelado' : rec === 'fixo' ? 'Fixa mensal' : 'Único (à vista)';
 
+  // qual parcela foi clicada (para edição individual)
+  let parcelaClicada = null, valorParcelaClicada = t.valor, amClicada = null;
+  if(rec === 'parcelado' && idAlvo.includes('#')){
+    amClicada = idAlvo.split('#')[1];               // "AAAA-MM"
+    const am = partesAM(amClicada);
+    const ini = partesAM(t.inicio || (t.data||'').slice(0,7));
+    if(ini.ano){
+      parcelaClicada = mesIndex(am.ano, am.mes) - mesIndex(ini.ano, ini.mes) + 1;
+      const custom = t.valores && t.valores[String(parcelaClicada)];
+      valorParcelaClicada = custom != null ? custom : t.valor;
+    }
+  }
+
   const camposRec = recorrente ? `
       ${campo(rec==='parcelado'?'Data da 1ª parcela':'Mês de início', `<input type="month" id="edInicio" value="${escapar(t.inicio || (t.data||'').slice(0,7))}">`, false)}
       ${rec==='parcelado' ? campo('Quantidade de parcelas', `<input type="number" min="1" max="120" id="edParcelas" value="${t.parcelas||1}">`, false) : ''}
   ` : '';
 
+  // bloco de edição individual da parcela clicada
+  const blocoParcela = parcelaClicada ? `
+    <div class="card-parcela-edit">
+      <div class="cpe-titulo"><i class="fa-solid fa-pen-to-square"></i> Só a parcela ${parcelaClicada}/${t.parcelas} · ${mesLabel(partesAM(amClicada).ano, partesAM(amClicada).mes)}</div>
+      ${campo('Valor desta parcela (R$)', `<input type="number" step="0.01" min="0" id="edValorParcela" value="${escapar(String(valorParcelaClicada))}">`, true)}
+      <p class="hint" style="padding:2px 4px 0">Altera apenas este mês — as outras parcelas não mudam.${t.valores && t.valores[String(parcelaClicada)]!=null ? ' <a href="#" id="edResetParcela" style="color:var(--rosa-forte);font-weight:600">Voltar ao valor padrão</a>' : ''}</p>
+    </div>` : '';
+
   abrirModal({
-    titulo: recorrente ? 'Editar série' : 'Editar lançamento',
+    titulo: recorrente ? (parcelaClicada ? 'Editar parcela / série' : 'Editar série') : 'Editar lançamento',
     corpo:`<div class="form-grid" style="padding-top:6px">
       ${recorrente
         ? campo('Recorrência', `<input type="text" value="${nomeRec}" disabled>`, false)
@@ -1224,12 +1357,14 @@ function editarTransacao(idAlvo){
       ${campo('Tipo', selectHTML('edTipo', [['despesa','Despesa'],['receita','Receita']], t.tipo), false)}
       ${campo('Categoria', selectHTML('edCategoria', dados.categorias[t.tipo], t.categoria), false)}
       ${campo('Pessoa / Contato (Pagar para / Receber de)', selectHTML('edPessoa', dados.pessoas, t.pessoa || 'Eu'), false)}
-      ${campo(rec==='parcelado'?'Valor de cada parcela (R$)':rec==='fixo'?'Valor por mês (R$)':'Valor (R$)', `<input type="number" step="0.01" min="0" id="edValor" value="${t.valor}">`, false)}
+      ${campo(rec==='parcelado'?'Valor padrão da parcela (R$)':rec==='fixo'?'Valor por mês (R$)':'Valor (R$)', `<input type="number" step="0.01" min="0" id="edValor" value="${t.valor}">`, false)}
       ${camposRec}
       ${recorrente ? '' : campo('Status', selectHTML('edStatus', opcoesStatus(t.tipo), t.status), false)}
       ${campo('Descrição', `<input type="text" id="edDescricao" value="${escapar(t.descricao)}">`)}
       ${campo('Observações', `<textarea id="edObs">${escapar(t.obs||'')}</textarea>`)}
-    </div>${recorrente ? '<p class="hint" style="padding:6px 4px 0">As alterações valem para todos os meses desta série.</p>' : ''}`,
+    </div>
+    ${blocoParcela}
+    ${recorrente ? `<p class="hint" style="padding:6px 4px 0">O “valor padrão” vale para as parcelas que você não editou individualmente.</p>` : ''}`,
     aoAbrir(){
       $('#edTipo').onchange = () => {
         const tipo = $('#edTipo').value;
@@ -1237,6 +1372,8 @@ function editarTransacao(idAlvo){
         const es = $('#edStatus');
         if(es) es.innerHTML = opcoesStatus(tipo).map(([v,txt])=>`<option value="${v}">${txt}</option>`).join('');
       };
+      const reset = $('#edResetParcela');
+      if(reset) reset.onclick = ev => { ev.preventDefault(); $('#edValorParcela').value = ''; $('#edValorParcela').placeholder = 'valor padrão'; };
     },
     onConfirm(){
       const v = num($('#edValor').value);
@@ -1254,8 +1391,29 @@ function editarTransacao(idAlvo){
         patch.status = $('#edStatus').value;
       }
       Object.assign(t, patch);
+
+      // remove overrides de parcelas que não existem mais
+      if(rec === 'parcelado' && t.valores){
+        Object.keys(t.valores).forEach(k => { if(Number(k) > t.parcelas) delete t.valores[k]; });
+      }
+
+      // edição individual da parcela clicada → grava/remove só naquele índice
+      if(parcelaClicada){
+        if(!t.valores) t.valores = {};
+        const campoP = $('#edValorParcela');
+        const raw = campoP ? campoP.value.trim() : '';
+        if(raw === ''){
+          delete t.valores[String(parcelaClicada)];       // volta ao padrão
+        } else {
+          const vp = num(raw);
+          if(vp > 0) t.valores[String(parcelaClicada)] = vp;
+          else delete t.valores[String(parcelaClicada)];
+        }
+        if(Object.keys(t.valores).length === 0) delete t.valores;
+      }
+
       salvar(); montarSelects(); renderizarTudo();
-      aviso(recorrente ? 'Série atualizada' : 'Lançamento atualizado');
+      aviso(parcelaClicada ? 'Parcela atualizada' : (recorrente ? 'Série atualizada' : 'Lançamento atualizado'));
     }
   });
 }
@@ -1308,7 +1466,8 @@ function seloRecorrencia(t){
   const rec = t.recorrencia || 'avista';
   if(rec === 'parcelado'){
     const info = (t._parcelaAtual && t._parcelasTotal) ? ` ${t._parcelaAtual}/${t._parcelasTotal}` : (t.parcelas ? ` ${t.parcelas}x` : '');
-    return `<span class="tag tag-recor"><i class="fa-solid fa-layer-group"></i>Parcela${info}</span>`;
+    const edit = t._valorEditado ? `<span class="tag tag-editada"><i class="fa-solid fa-pen"></i>valor ajustado</span>` : '';
+    return `<span class="tag tag-recor"><i class="fa-solid fa-layer-group"></i>Parcela${info}</span>${edit}`;
   }
   if(rec === 'fixo') return `<span class="tag tag-recor fixa"><i class="fa-solid fa-repeat"></i>Fixa</span>`;
   return '';
